@@ -1,5 +1,5 @@
 {
-  "id": "ffe489d7-cfb6-41b4-bed1-a1403a2afc91",
+  "id": "96c4e843-9da3-42b3-b5ec-26076476960f",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -40,7 +40,23 @@
           "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "measurements_date_idx": {
+          "name": "measurements_date_idx",
+          "columns": [
+            {
+              "expression": "date",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},

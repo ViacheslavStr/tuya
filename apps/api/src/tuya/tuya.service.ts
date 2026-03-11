@@ -192,6 +192,7 @@ export class TuyaService {
   async getDeviceMetrics() {
     const deviceId = this.mustGet('TUYA_DEVICE_ID');
     const token = await this.getAccessToken();
+    const now = new Date();
 
     const statusRes = await this.tuyaFetch<TuyaStatusItem[]>({
       method: 'GET',
@@ -237,11 +238,15 @@ export class TuyaService {
     // best-effort запись в БД; ошибки не должны ломать основной ответ
     try {
       if (voltage !== null || current !== null || power !== null) {
-        await this.db.insert(measurements).values({
-          voltage: voltage ?? null,
-          current: current ?? null,
-          power: power ?? null,
-        });
+        await this.db
+          .insert(measurements)
+          .values({
+            date: now,
+            voltage: voltage ?? null,
+            current: current ?? null,
+            power: power ?? null,
+          })
+          .onConflictDoNothing({ target: measurements.date });
       }
     } catch (e) {
       // eslint-disable-next-line no-console
@@ -251,7 +256,7 @@ export class TuyaService {
     return {
       deviceId,
       region: this.region,
-      fetchedAt: new Date().toISOString(),
+      fetchedAt: now.toISOString(),
       metrics: {
         current,
         voltage,
@@ -261,5 +266,151 @@ export class TuyaService {
       },
       status,
     };
+  }
+
+  /**
+   * Читает логи DP (type=7) за указанный промежуток времени.
+   * startMs / endMs — timestamp в миллисекундах.
+   */
+  private async fetchDpLogsRange(opts: {
+    deviceId: string;
+    accessToken: string;
+    startMs: number;
+    endMs: number;
+    codes: string[];
+  }): Promise<
+    Array<{
+      code: string;
+      value: unknown;
+      event_time: number;
+    }>
+  > {
+    const { deviceId, accessToken, startMs, endMs, codes } = opts;
+    const all: {
+      code: string;
+      value: unknown;
+      event_time: number;
+    }[] = [];
+
+    let nextRowKey: string | undefined;
+    // Ограничим количество итераций, чтобы не зациклиться при странном ответе.
+    for (let i = 0; i < 10_000; i += 1) {
+      const params = new URLSearchParams({
+        type: '7',
+        start_time: String(startMs),
+        end_time: String(endMs),
+        size: '100',
+      });
+      if (codes.length) {
+        params.set('codes', codes.join(','));
+      }
+      if (nextRowKey) {
+        params.set('start_row_key', nextRowKey);
+      }
+
+      const pathWithQuery = `/v1.0/devices/${encodeURIComponent(deviceId)}/logs?${params.toString()}`;
+
+      const res = await this.tuyaFetch<{
+        device_id: string;
+        has_next: boolean;
+        next_row_key?: string;
+        logs: {
+          code: string;
+          value: unknown;
+          event_time: number;
+        }[];
+      }>({
+        method: 'GET',
+        pathWithQuery,
+        accessToken,
+      });
+
+      const { logs, has_next, next_row_key } = res.result ?? {
+        logs: [],
+        has_next: false,
+      };
+
+      if (logs?.length) {
+        all.push(...logs);
+      }
+
+      if (!has_next || !next_row_key) {
+        break;
+      }
+
+      nextRowKey = next_row_key;
+    }
+
+    return all;
+  }
+
+  /**
+   * Одноразовая синхронизация истории по логам DP в measurements.
+   * Пишем отдельную строку на каждое событие, заполняя только одно из полей
+   * voltage / current / power в зависимости от кода DP.
+   */
+  async syncHistoryFromLogs(start: Date, end: Date): Promise<{ inserted: number }> {
+    const deviceId = this.mustGet('TUYA_DEVICE_ID');
+    const token = await this.getAccessToken();
+
+    const startMs = start.getTime();
+    const endMs = end.getTime();
+    const logs = await this.fetchDpLogsRange({
+      deviceId,
+      accessToken: token,
+      startMs,
+      endMs,
+      codes: ['cur_current', 'cur_voltage', 'cur_power'],
+    });
+
+    let inserted = 0;
+
+    for (const log of logs) {
+      const t = new Date(log.event_time);
+      const num = typeof log.value === 'number' ? log.value : Number(log.value);
+      if (Number.isNaN(num)) continue;
+
+      let voltage: number | null = null;
+      let current: number | null = null;
+      let power: number | null = null;
+
+      if (log.code === 'cur_voltage') voltage = num;
+      else if (log.code === 'cur_current') current = num;
+      else if (log.code === 'cur_power') power = num;
+      else continue;
+
+      await this.db
+        .insert(measurements)
+        .values({
+          date: t,
+          voltage,
+          current,
+          power,
+        })
+        .onConflictDoNothing({ target: measurements.date });
+
+      inserted += 1;
+    }
+
+    return { inserted };
+  }
+
+  /** Вытянуть историю за последний год и сохранить её в measurements. */
+  async syncHistoryYearFromLogs(): Promise<{ inserted: number }> {
+    const end = new Date();
+    const start = new Date(end);
+    start.setFullYear(start.getFullYear() - 1);
+    return this.syncHistoryFromLogs(start, end);
+  }
+
+  /** Вытянуть историю за вчера и сохранить её в measurements. */
+  async syncHistoryYesterdayFromLogs(): Promise<{ inserted: number }> {
+    const end = new Date();
+    const start = new Date(end);
+    start.setDate(start.getDate() - 1);
+    start.setHours(0, 0, 0, 0);
+    end.setFullYear(start.getFullYear(), start.getMonth(), start.getDate());
+    end.setDate(end.getDate() + 1);
+    return this.syncHistoryFromLogs(start, end);
   }
 }
