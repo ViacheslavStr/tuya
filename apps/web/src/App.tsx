@@ -141,16 +141,16 @@ function App() {
 
   const todayTotal = useMemo(() => {
     if (today.length < 2) return 0
-    let wh = 0
+    let energyWs = 0
     for (let i = 0; i < today.length - 1; i++) {
-      const t0 = new Date(today[i].ts).getTime()
-      const t1 = new Date(today[i + 1].ts).getTime()
-      const hours = (t1 - t0) / (1000 * 3600)
-      const p0 = today[i].value ?? 0
-      const p1 = today[i + 1].value ?? 0
-      wh += ((p0 + p1) / 2) * hours
+      const p1 = today[i].value ?? 0
+      const p2 = today[i + 1].value ?? 0
+      const t1 = new Date(today[i].ts).getTime()
+      const t2 = new Date(today[i + 1].ts).getTime()
+      const dtSec = (t2 - t1) / 1000
+      energyWs += ((p1 + p2) / 2) * dtSec
     }
-    return wh
+    return energyWs / 3600
   }, [today])
 
   return (

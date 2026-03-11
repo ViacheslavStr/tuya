@@ -72,11 +72,12 @@ export class MetricsService {
     const col = this.getMetricColumn(metric);
     const query = sql`
       select
-        ${measurements.date} as ts,
-        ${col} as value
+        date_trunc('minute', ${measurements.date}) as ts,
+        avg(${col}) as value
       from ${measurements}
       where ${measurements.date} >= date_trunc('day', now())
-      order by ${measurements.date};
+      group by date_trunc('minute', ${measurements.date})
+      order by ts;
     `;
     const result = await this.db.execute(query);
     return result.rows.map((r: any) => ({
@@ -85,4 +86,3 @@ export class MetricsService {
     }));
   }
 }
-

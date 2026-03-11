@@ -94,15 +94,22 @@ export class TuyaService {
     const nonce = crypto.randomUUID();
 
     const bodyStr = opts.body === undefined ? '' : JSON.stringify(opts.body);
-    const stringToSign = this.buildStringToSign({
-      method: opts.method,
-      urlPathWithQuery: opts.urlPathWithQuery,
-      body: bodyStr,
-    });
-
     const accessToken = opts.accessToken ?? '';
-    const signStr = `${clientId}${accessToken}${t}${nonce}${stringToSign}`;
-    const sign = this.hmacSha256UpperHex(secret, signStr);
+
+    let sign: string;
+    if (opts.urlPathWithQuery.includes('iot-03')) {
+      // Эндпоинты iot-03 на openapi используют архивный алгоритм: только client_id + access_token + t
+      const signStr = `${clientId}${accessToken}${t}`;
+      sign = this.hmacSha256UpperHex(secret, signStr);
+    } else {
+      const stringToSign = this.buildStringToSign({
+        method: opts.method,
+        urlPathWithQuery: opts.urlPathWithQuery,
+        body: bodyStr,
+      });
+      const signStr = `${clientId}${accessToken}${t}${nonce}${stringToSign}`;
+      sign = this.hmacSha256UpperHex(secret, signStr);
+    }
 
     const headers: Record<string, string> = {
       client_id: clientId,
@@ -189,6 +196,14 @@ export class TuyaService {
     return null;
   }
 
+  /** Напряжение и мощность: raw / 100. Ток: raw / 1000 (мА → А). */
+  private scaleVp(v: number | null): number | null {
+    return v !== null ? v / 100 : null;
+  }
+  private scaleCurrent(v: number | null): number | null {
+    return v !== null ? v / 1000 : null;
+  }
+
   async getDeviceMetrics() {
     const deviceId = this.mustGet('TUYA_DEVICE_ID');
     const token = await this.getAccessToken();
@@ -221,6 +236,9 @@ export class TuyaService {
       'curPower',
       'p',
     ]);
+    const voltageScaled = this.scaleVp(voltage);
+    const currentScaled = this.scaleCurrent(current);
+    const powerScaled = this.scaleVp(power);
     const energy = this.pickFirstNumber(status, [
       'add_ele',
       'energy',
@@ -242,9 +260,9 @@ export class TuyaService {
           .insert(measurements)
           .values({
             date: now,
-            voltage: voltage ?? null,
-            current: current ?? null,
-            power: power ?? null,
+            voltage: voltageScaled ?? null,
+            current: currentScaled ?? null,
+            power: powerScaled ?? null,
           })
           .onConflictDoNothing({ target: measurements.date });
       }
@@ -258,9 +276,9 @@ export class TuyaService {
       region: this.region,
       fetchedAt: now.toISOString(),
       metrics: {
-        current,
-        voltage,
-        power,
+        current: currentScaled,
+        voltage: voltageScaled,
+        power: powerScaled,
         energy,
         soc,
       },
@@ -269,8 +287,9 @@ export class TuyaService {
   }
 
   /**
-   * Читает логи DP (type=7) за указанный промежуток времени.
-   * startMs / endMs — timestamp в миллисекундах.
+   * Читает логи отчётов статуса (DP) за указанный промежуток.
+   * Использует актуальный API: GET /v1.0/iot-03/devices/{device_id}/report-logs.
+   * Параметры в URL сортируются по ключу (требование Tuya для подписи).
    */
   private async fetchDpLogsRange(opts: {
     deviceId: string;
@@ -292,53 +311,45 @@ export class TuyaService {
       event_time: number;
     }[] = [];
 
-    let nextRowKey: string | undefined;
-    // Ограничим количество итераций, чтобы не зациклиться при странном ответе.
+    let lastRowKey: string | undefined;
     for (let i = 0; i < 10_000; i += 1) {
-      const params = new URLSearchParams({
-        type: '7',
-        start_time: String(startMs),
+      const query: Record<string, string> = {
+        codes: codes.join(','),
         end_time: String(endMs),
+        start_time: String(startMs),
         size: '100',
-      });
-      if (codes.length) {
-        params.set('codes', codes.join(','));
+      };
+      if (lastRowKey) {
+        query['last_row_key'] = lastRowKey;
       }
-      if (nextRowKey) {
-        params.set('start_row_key', nextRowKey);
-      }
+      const sortedKeys = Object.keys(query).sort();
+      const queryString = sortedKeys
+        .map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(query[k])}`)
+        .join('&');
 
-      const pathWithQuery = `/v1.0/devices/${encodeURIComponent(deviceId)}/logs?${params.toString()}`;
+      const pathWithQuery = `/v1.0/iot-03/devices/${encodeURIComponent(deviceId)}/report-logs?${queryString}`;
 
       const res = await this.tuyaFetch<{
         device_id: string;
-        has_next: boolean;
-        next_row_key?: string;
-        logs: {
-          code: string;
-          value: unknown;
-          event_time: number;
-        }[];
+        has_more: boolean;
+        last_row_key?: string;
+        list?: Array<{ code: string; value: unknown; event_time: number }>;
+        logs?: Array<{ code: string; value: unknown; event_time: number }>;
       }>({
         method: 'GET',
         pathWithQuery,
         accessToken,
       });
 
-      const { logs, has_next, next_row_key } = res.result ?? {
-        logs: [],
-        has_next: false,
-      };
-
-      if (logs?.length) {
-        all.push(...logs);
+      const list = res.result?.list ?? res.result?.logs ?? [];
+      if (list.length) {
+        all.push(...list);
       }
 
-      if (!has_next || !next_row_key) {
+      if (!res.result?.has_more || !res.result?.last_row_key) {
         break;
       }
-
-      nextRowKey = next_row_key;
+      lastRowKey = res.result.last_row_key;
     }
 
     return all;
@@ -374,9 +385,9 @@ export class TuyaService {
       let current: number | null = null;
       let power: number | null = null;
 
-      if (log.code === 'cur_voltage') voltage = num;
-      else if (log.code === 'cur_current') current = num;
-      else if (log.code === 'cur_power') power = num;
+      if (log.code === 'cur_voltage') voltage = num / 100;
+      else if (log.code === 'cur_current') current = num / 1000;
+      else if (log.code === 'cur_power') power = num / 100;
       else continue;
 
       await this.db
