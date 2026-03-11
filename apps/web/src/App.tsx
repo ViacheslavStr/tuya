@@ -49,7 +49,7 @@ function App() {
 
   useEffect(() => {
     void refresh()
-    const id = window.setInterval(() => void refresh(), 5000)
+    const id = window.setInterval(() => void refresh(), 10000)
     return () => window.clearInterval(id)
   }, [])
 

@@ -1,7 +1,10 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import crypto from 'node:crypto';
 import { TuyaRegion, TuyaResponse, TuyaStatusItem } from './tuya.types';
+import type { Db } from '../db/db.module';
+import { DRIZZLE } from '../db/db.module';
+import { measurements } from '../db/schema';
 
 type CachedToken = {
   value: string;
@@ -12,7 +15,10 @@ type CachedToken = {
 export class TuyaService {
   private tokenCache: CachedToken | null = null;
 
-  constructor(private readonly config: ConfigService) {}
+  constructor(
+    private readonly config: ConfigService,
+    @Inject(DRIZZLE) private readonly db: Db,
+  ) {}
 
   private get region(): TuyaRegion {
     return (this.config.get<string>('TUYA_REGION') ?? 'EU') as TuyaRegion;
@@ -228,6 +234,19 @@ export class TuyaService {
       'battery',
       'percent',
     ]);
+    // best-effort запись в БД; ошибки не должны ломать основной ответ
+    try {
+      if (voltage !== null || current !== null || power !== null) {
+        await this.db.insert(measurements).values({
+          voltage: voltage ?? null,
+          current: current ?? null,
+          power: power ?? null,
+        });
+      }
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.error('Failed to insert measurement', e);
+    }
 
     return {
       deviceId,

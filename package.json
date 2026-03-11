@@ -9,7 +9,13 @@
     "dev:web": "npm run dev -w @tuya/web",
     "dev:api": "npm run dev -w @tuya/api",
     "build": "npm run build -w @tuya/api && npm run build -w @tuya/web",
-    "lint": "npm run lint -w @tuya/api && npm run lint -w @tuya/web"
+    "lint": "npm run lint -w @tuya/api && npm run lint -w @tuya/web",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio"
+  },
+  "devDependencies": {
+    "dotenv": "^17.3.1",
+    "drizzle-kit": "^0.31.9"
   }
 }
-
